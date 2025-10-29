@@ -35,6 +35,7 @@ import (
 	"cloud.google.com/go/compute/metadata"
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
+	"golang.org/x/oauth2/google/downscope"
 	computealpha "google.golang.org/api/compute/v0.alpha"
 	computebeta "google.golang.org/api/compute/v0.beta"
 	compute "google.golang.org/api/compute/v1"
@@ -83,6 +84,7 @@ const (
 
 	gceComputeAPIEndpoint     = "https://www.googleapis.com/compute/v1/"
 	gceComputeAPIEndpointBeta = "https://www.googleapis.com/compute/beta/"
+	gceAuthAPIEndpoint        = "https://www.googleapis.com/auth/cloud-platform"
 )
 
 var _ cloudprovider.Interface = (*Cloud)(nil)
@@ -391,6 +393,40 @@ func generateCloudConfig(configFile *ConfigFile) (cloudConfig *CloudConfig, err 
 			cloudConfig.NetworkProjectID = configFile.Global.NetworkProjectID
 		}
 	}
+
+	// Downscope the token
+	ctx := context.Background()
+	rules := []downscope.AccessBoundaryRule{
+		{
+			AvailableResource: "//cloudresourcemanager.googleapis.com/projects/" + cloudConfig.ProjectID,
+			AvailablePermissions: []string{
+				"inRole:roles/compute.instanceGroupManagerServiceAgent",
+				"inRole:roles/compute.computeViewer",
+			},
+		},
+	}
+
+	rootSource := cloudConfig.TokenSource
+	// If no token source is configured, fall back to Application Default Credentials.
+	if rootSource == nil {
+		var err error
+		rootSource, err = google.DefaultTokenSource(ctx, gceAuthAPIEndpoint)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get default token source for downscoping: %v", err)
+		}
+	}
+
+	// Create the downscoped token source.
+	downscopedSource, err := downscope.NewTokenSource(context.Background(), downscope.DownscopingConfig{
+		RootSource: rootSource,
+		Rules:      rules,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to create downscoped token source: %v", err)
+	}
+	// Replace the original token source with the downscoped one.
+	klog.Infof("Using downscoped token source for GCE cloud provider --- Test")
+	cloudConfig.TokenSource = downscopedSource
 
 	// retrieve region
 	cloudConfig.Region, err = GetGCERegion(cloudConfig.Zone)
