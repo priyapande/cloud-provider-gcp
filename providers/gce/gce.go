@@ -34,11 +34,13 @@ import (
 
 	"cloud.google.com/go/compute/metadata"
 	"golang.org/x/oauth2"
+	"golang.org/x/oauth2/downscope"
 	"golang.org/x/oauth2/google"
 	computealpha "google.golang.org/api/compute/v0.alpha"
 	computebeta "google.golang.org/api/compute/v0.beta"
 	compute "google.golang.org/api/compute/v1"
 	container "google.golang.org/api/container/v1"
+
 	"google.golang.org/api/option"
 
 	"github.com/GoogleCloudPlatform/k8s-cloud-provider/pkg/cloud"
@@ -246,6 +248,10 @@ type ConfigGlobal struct {
 	// Default to none.
 	// For example: MyFeatureFlag
 	AlphaFeatures []string `gcfg:"alpha-features"`
+	// DownscopeRules are the IAM downscoping rules to apply to the token source to
+	// limit access to resources in the cloud to need only.
+	// Default to empty.
+	DownscopeRules []string `gcfg:"downscope-rules"`
 }
 
 // ConfigFile is the struct used to parse the /etc/gce.conf configuration file.
@@ -391,6 +397,41 @@ func generateCloudConfig(configFile *ConfigFile) (cloudConfig *CloudConfig, err 
 			cloudConfig.NetworkProjectID = configFile.Global.NetworkProjectID
 		}
 	}
+
+	// Downscope the token
+	ctx := context.Background()
+	rules := []downscope.AccessBoundaryRule{
+		{
+			AvailableResource: "//cloudresourcemanager.googleapis.com/projects/" + cloudConfig.ProjectID,
+			AvailablePermissions: []string{
+				"inRole:roles/compute.loadBalancerAdmin",
+				"inRole:roles/compute.securityAdmin",
+				"inRole:roles/compute.viewer",
+			},
+		},
+	}
+
+	rootSource := cloudConfig.TokenSource
+	// If no token source is configured, fall back to Application Default Credentials.
+	if rootSource == nil {
+		var err error
+		rootSource, err = google.DefaultTokenSource(ctx, "https://www.googleapis.com/auth/cloud-platform")
+		if err != nil {
+			return nil, klog.Errorf("failed to get default token source for downscoping: %v", err)
+		}
+	}
+
+	// Create the downscoped token source.
+	downscopedSource, err := downscope.NewTokenSource(context.Background(), downscope.DownscopingConfig{
+		RootSource: rootSource,
+		Rules:      rules,
+	})
+	if err != nil {
+		return nil, klog.Errorf("failed to create downscoped token source: %v", err)
+	}
+	// Replace the original token source with the downscoped one.
+	klog.Infof("Using downscoped token source for GCE cloud provider --- Test")
+	cloudConfig.TokenSource = downscopedTokenSource
 
 	// retrieve region
 	cloudConfig.Region, err = GetGCERegion(cloudConfig.Zone)
